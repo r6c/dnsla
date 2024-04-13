@@ -107,7 +107,7 @@ func (record dnslaDomainRecordResponse) toLibdnsRecord(zone string) libdns.Recor
 	return libdns.Record{
 		ID:       record.ID,
 		Name:     libdns.RelativeName(record.Host, libdnsZoneToDnslaDomain(zone)),
-		Priority: record.Weight,
+		Priority: uint(record.Weight),
 		TTL:      ttl,
 		Type:     recordType,
 		Value:    record.Data,
