@@ -1,19 +1,15 @@
 package dnsla
 
 import (
-	"bytes"
-	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/libdns/libdns"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
+
+	"github.com/libdns/libdns"
 )
 
 const ApiBase = "https://api.dns.la"
@@ -33,19 +29,29 @@ func (p *Provider) getMatchingRecord(r libdns.Record, domainId string, zone stri
 	var recs []libdns.Record
 	credentials := p.getCredentials()
 
-	recordType := libDnsToDnslaRecordType(r.Type)
-	response, err := MakeApiRequest("GET", "/api/recordList?pageIndex=1&pageSize=10&domainId="+
-		domainId+"&type="+fmt.Sprintf("%d", recordType)+"&host="+r.Name,
-		credentials, nil, dnslaDomainRecordsResponse{})
+	rr := extractRR(r)
+	recordType := libDnsToDnslaRecordType(rr.Type)
+
+	// URL encode the parameters
+	params := url.Values{}
+	params.Set("pageIndex", "1")
+	params.Set("pageSize", "10")
+	params.Set("domainId", domainId)
+	params.Set("type", fmt.Sprintf("%d", recordType))
+	params.Set("host", rr.Name)
+
+	endpoint := "/api/recordList?" + params.Encode()
+	response, err := MakeApiRequest("GET", endpoint, credentials, nil, dnslaDomainRecordsResponse{})
 	if err != nil {
 		return nil, err
 	}
 
 	total := response.Total
 	if total > 10 {
-		response, err = MakeApiRequest("GET", "/api/recordList?pageIndex=1&pageSize=10&domainId="+
-			domainId+"&type="+fmt.Sprintf("%d", recordType)+"&host="+r.Name,
-			credentials, nil, dnslaDomainRecordsResponse{})
+		// Update page size for larger result sets
+		params.Set("pageSize", fmt.Sprintf("%d", total))
+		endpoint = "/api/recordList?" + params.Encode()
+		response, err = MakeApiRequest("GET", endpoint, credentials, nil, dnslaDomainRecordsResponse{})
 		if err != nil {
 			return nil, err
 		}
@@ -56,44 +62,6 @@ func (p *Provider) getMatchingRecord(r libdns.Record, domainId string, zone stri
 		recs = append(recs, rec.toLibdnsRecord(zone))
 	}
 	return recs, nil
-}
-
-// UpdateRecords adds records to the zone. It returns the records that were added.
-func (p *Provider) updateRecords(_ context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
-	credentials := p.getCredentials()
-
-	var createdRecords []libdns.Record
-
-	for _, record := range records {
-		if record.TTL/time.Second < 600 {
-			record.TTL = 600 * time.Second
-		}
-		ttlInSeconds := int(record.TTL / time.Second)
-		trimmedName := libdns.RelativeName(record.Name, zone)
-		recordType := libDnsToDnslaRecordType(record.Type)
-
-		reqBody := dnslaRecordPayload{
-			ID:         record.ID,
-			Type:       recordType,
-			Host:       trimmedName,
-			Data:       record.Value,
-			TTL:        ttlInSeconds,
-			Preference: 1,
-			Weight:     1,
-		}
-		reqJson, err := json.Marshal(reqBody)
-		if err != nil {
-			return nil, err
-		}
-		_, err = MakeApiRequest("PUT", "/api/record", credentials, bytes.NewReader(reqJson), dnslaUpdateRecordResponse{})
-		if err != nil {
-			return nil, err
-		}
-
-		createdRecords = append(createdRecords, record)
-	}
-
-	return createdRecords, nil
 }
 
 func MakeApiRequest[T any](method string, endpoint string, token string, body io.Reader, responseType T) (T, error) {
@@ -117,15 +85,14 @@ func MakeApiRequest[T any](method string, endpoint string, token string, body io
 		return responseType, err
 	}
 	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			log.Fatal("Couldn't close body")
-		}
+		// Ignore close errors as they are typically not critical
+		_ = Body.Close()
 	}(resp.Body)
 
-	if resp.StatusCode != http.StatusOK {
+	// Accept all 2xx status codes as success
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		err = errors.New("Invalid http response status, " + string(bodyBytes))
+		err = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(bodyBytes))
 		return responseType, err
 	}
 
@@ -137,11 +104,11 @@ func MakeApiRequest[T any](method string, endpoint string, token string, body io
 	response := dnslaResponse{Data: &responseType}
 	err = json.Unmarshal(result, &response)
 	if err != nil {
-		return responseType, err
+		return responseType, fmt.Errorf("failed to parse JSON response: %v", err)
 	}
 
 	if response.Code != 200 {
-		return responseType, errors.New(fmt.Sprintf("Invalid response code %d", response.Code))
+		return responseType, fmt.Errorf("API error (code %d): %s", response.Code, response.Msg)
 	}
 
 	return responseType, nil

@@ -2,10 +2,12 @@ package dnsla
 
 import (
 	"context"
-	"github.com/libdns/libdns"
 	"log"
+	"os"
 	"testing"
 	"time"
+
+	"github.com/libdns/libdns"
 )
 
 var records []libdns.Record
@@ -24,19 +26,17 @@ func getInitialRecords(t *testing.T, provider Provider, zone string) []libdns.Re
 }
 
 func createOrGetTestRecord(t *testing.T, provider Provider, zone string) libdns.Record {
-	if testRecord.ID == "" {
+	if testRecord == nil {
 		testValue := "test-value"
 		ttl := 600 * time.Second
-		recordType := "TXT"
 		testFullName := "libdns_test_record"
 
-		//Create record
+		//Create TXT record
 		appendedRecords, err := provider.AppendRecords(context.TODO(), zone, []libdns.Record{
-			{
-				Type:  recordType,
-				Name:  testFullName,
-				TTL:   ttl,
-				Value: testValue,
+			libdns.TXT{
+				Name: testFullName,
+				TTL:  ttl,
+				Text: testValue,
 			},
 		})
 
@@ -55,9 +55,14 @@ func createOrGetTestRecord(t *testing.T, provider Provider, zone string) libdns.
 }
 
 func getProvider(t *testing.T) (Provider, string) {
-	apiId := ""
-	apiSecret := ""
-	zone := "test-for-jump.com"
+	// Get credentials from environment variables
+	apiId := os.Getenv("DNSLA_API_ID")
+	apiSecret := os.Getenv("DNSLA_API_SECRET")
+	zone := os.Getenv("DNSLA_TEST_ZONE")
+
+	if apiId == "" || apiSecret == "" || zone == "" {
+		t.Skip("Skipping test: DNSLA_API_ID, DNSLA_API_SECRET, and DNSLA_TEST_ZONE environment variables must be set")
+	}
 
 	provider := Provider{
 		APIID:     apiId,
@@ -74,7 +79,9 @@ func TestProvider_GetRecords(t *testing.T) {
 
 	log.Println("Records fetched:")
 	for _, record := range initialRecords {
-		t.Logf("%s %s (.%s): %s, %s\n", record.ID, record.Name, zone, record.Value, record.Type)
+		rr := extractRR(record)
+		recordID := extractID(record)
+		t.Logf("%s %s (.%s): %s, %s\n", recordID, rr.Name, zone, rr.Data, rr.Type)
 	}
 }
 
@@ -95,7 +102,8 @@ func TestProvider_AppendRecords(t *testing.T) {
 		t.Errorf("Additional record not created")
 	}
 
-	t.Logf("Created record: \n%v\n", createdRecord.ID)
+	recordID := extractID(createdRecord)
+	t.Logf("Created record: \n%v\n", recordID)
 }
 
 func TestProvider_UpdateRecordsByLookup(t *testing.T) {
@@ -107,17 +115,15 @@ func TestProvider_UpdateRecordsByLookup(t *testing.T) {
 	//_ = createOrGetTestRecord(t, provider, zone)
 
 	ttl := 600 * time.Second
-	recordType := "TXT"
 	testFullName := "libdns_test_record"
 
 	updatedTestValue := "updated-test-value-by-lookup"
 	// Update record
 	updatedRecords, err := provider.SetRecords(context.TODO(), zone, []libdns.Record{
-		{
-			Type:  recordType,
-			Name:  testFullName,
-			TTL:   ttl,
-			Value: updatedTestValue,
+		libdns.TXT{
+			Name: testFullName,
+			TTL:  ttl,
+			Text: updatedTestValue,
 		},
 	})
 
@@ -149,18 +155,18 @@ func TestProvider_DeleteRecords(t *testing.T) {
 	//createdRecord := createOrGetTestRecord(t, provider, zone)
 
 	ttl := 600 * time.Second
-	recordType := "TXT"
 	testFullName := "libdns_test_record"
 
 	updatedTestValue := "updated-test-value-by-lookup"
 
 	// Delete record
-	deleteRecords, err := provider.DeleteRecords(context.TODO(), zone, []libdns.Record{{
-		Type:  recordType,
-		Name:  testFullName,
-		TTL:   ttl,
-		Value: updatedTestValue,
-	}})
+	deleteRecords, err := provider.DeleteRecords(context.TODO(), zone, []libdns.Record{
+		libdns.TXT{
+			Name: testFullName,
+			TTL:  ttl,
+			Text: updatedTestValue,
+		},
+	})
 
 	if err != nil {
 		t.Error(err)

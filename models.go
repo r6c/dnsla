@@ -1,10 +1,18 @@
 package dnsla
 
 import (
-	"fmt"
-	"github.com/libdns/libdns"
+	"net/netip"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/libdns/libdns"
 )
+
+// DNSLAProviderData stores DNS.LA specific data for records
+type DNSLAProviderData struct {
+	ID string
+}
 
 type dnslaResponse struct {
 	Code int    `json:"code"`
@@ -63,7 +71,7 @@ type dnslaDomainRecordResponse struct {
 }
 
 type dnslaRecordPayload struct {
-	ID         string `json:"Id"`
+	ID         string `json:"id"`
 	Type       int    `json:"type"`
 	Host       string `json:"host"`
 	Data       string `json:"data"`
@@ -99,18 +107,154 @@ type dnslaUpdateRecordResponse struct {
 }
 
 func (record dnslaDomainRecordResponse) toLibdnsRecord(zone string) libdns.Record {
-	ttl, _ := time.ParseDuration(fmt.Sprintf("%ds", record.TTL))
-	var recordType string
+	ttl := time.Duration(record.TTL) * time.Second
+	relativeName := libdns.RelativeName(record.Host, libdnsZoneToDnslaDomain(zone))
 
-	recordType = dnslaToLibDnsRecordType(record.Type)
+	providerData := DNSLAProviderData{ID: record.ID}
 
-	return libdns.Record{
-		ID:       record.ID,
-		Name:     libdns.RelativeName(record.Host, libdnsZoneToDnslaDomain(zone)),
-		Priority: uint(record.Weight),
-		TTL:      ttl,
-		Type:     recordType,
-		Value:    record.Data,
+	switch record.Type {
+	case 1: // A record
+		ip, err := netip.ParseAddr(record.Data)
+		if err != nil {
+			// Return RR for invalid IP addresses
+			return libdns.RR{
+				Name: relativeName,
+				TTL:  ttl,
+				Type: "A",
+				Data: record.Data,
+			}
+		}
+		return libdns.Address{
+			Name:         relativeName,
+			TTL:          ttl,
+			IP:           ip,
+			ProviderData: providerData,
+		}
+	case 28: // AAAA record
+		ip, err := netip.ParseAddr(record.Data)
+		if err != nil {
+			// Return RR for invalid IP addresses
+			return libdns.RR{
+				Name: relativeName,
+				TTL:  ttl,
+				Type: "AAAA",
+				Data: record.Data,
+			}
+		}
+		return libdns.Address{
+			Name:         relativeName,
+			TTL:          ttl,
+			IP:           ip,
+			ProviderData: providerData,
+		}
+	case 16: // TXT record
+		return libdns.TXT{
+			Name:         relativeName,
+			TTL:          ttl,
+			Text:         record.Data,
+			ProviderData: providerData,
+		}
+	case 5: // CNAME record
+		return libdns.CNAME{
+			Name:         relativeName,
+			TTL:          ttl,
+			Target:       record.Data,
+			ProviderData: providerData,
+		}
+	case 15: // MX record
+		return libdns.MX{
+			Name:         relativeName,
+			TTL:          ttl,
+			Preference:   uint16(record.Preference),
+			Target:       record.Data,
+			ProviderData: providerData,
+		}
+	case 2: // NS record
+		return libdns.NS{
+			Name:         relativeName,
+			TTL:          ttl,
+			Target:       record.Data,
+			ProviderData: providerData,
+		}
+	case 33: // SRV record
+		// SRV record data format: "port target" or "priority weight port target"
+		// Name format should be "_service._protocol.name"
+		parts := strings.Fields(record.Data)
+		var port uint16 = 443
+		var target string = record.Data
+
+		if len(parts) >= 2 {
+			// Try to parse port from data
+			if p, err := strconv.ParseUint(parts[0], 10, 16); err == nil {
+				port = uint16(p)
+				target = parts[1]
+			} else if len(parts) >= 4 {
+				// Format: priority weight port target
+				if p, err := strconv.ParseUint(parts[2], 10, 16); err == nil {
+					port = uint16(p)
+					target = parts[3]
+				}
+			}
+		}
+
+		// Extract service and transport from name
+		var service, transport string
+		nameParts := strings.Split(relativeName, ".")
+		if len(nameParts) >= 2 {
+			if strings.HasPrefix(nameParts[0], "_") {
+				service = strings.TrimPrefix(nameParts[0], "_")
+			}
+			if strings.HasPrefix(nameParts[1], "_") {
+				transport = strings.TrimPrefix(nameParts[1], "_")
+			}
+		}
+
+		return libdns.SRV{
+			Service:      service,
+			Transport:    transport,
+			Name:         relativeName,
+			TTL:          ttl,
+			Priority:     uint16(record.Preference),
+			Weight:       uint16(record.Weight),
+			Port:         port,
+			Target:       target,
+			ProviderData: providerData,
+		}
+	case 257: // CAA record
+		// CAA record data format: "flags tag value"
+		parts := strings.Fields(record.Data)
+		var flags uint8 = 0
+		var tag string = ""
+		var value string = record.Data
+
+		if len(parts) >= 3 {
+			// Parse flags
+			if f, err := strconv.ParseUint(parts[0], 10, 8); err == nil {
+				flags = uint8(f)
+			}
+			tag = parts[1]
+			// Value might contain spaces, so join the remaining parts
+			value = strings.Join(parts[2:], " ")
+			// Remove quotes if present
+			value = strings.Trim(value, `"`)
+		}
+
+		return libdns.CAA{
+			Name:         relativeName,
+			TTL:          ttl,
+			Flags:        flags,
+			Tag:          tag,
+			Value:        value,
+			ProviderData: providerData,
+		}
+	default:
+		// Return RR for unknown record types
+		return libdns.RR{
+			Name: relativeName,
+			TTL:  ttl,
+			Type: dnslaToLibDnsRecordType(record.Type),
+			Data: record.Data,
+		}
 	}
 }
 
